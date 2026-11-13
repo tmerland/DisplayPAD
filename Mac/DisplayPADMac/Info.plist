@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Identifiant unique de l'application -->
+    <key>CFBundleIdentifier</key>
+    <string>com.displaypad.mac</string>
+
+    <!-- Nom affiché de l'application -->
+    <key>CFBundleName</key>
+    <string>DisplayPAD</string>
+
+    <!-- Nom de l'exécutable -->
+    <key>CFBundleExecutable</key>
+    <string>DisplayPADMac</string>
+
+    <!-- Version marketing (affichée dans À propos) -->
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+
+    <!-- Version de build (entier, incrémenté à chaque build) -->
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Type de paquet : application -->
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+
+    <!-- Classe principale de l'application (AppDelegate via @main) -->
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <!-- LSUIElement = YES → app en menu bar sans icône dans le Dock -->
+    <!-- L'app ne figure pas dans le Dock ni dans le sélecteur d'apps Cmd+Tab -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- Description de l'utilisation de la capture d'écran (obligatoire pour ScreenCaptureKit) -->
+    <!-- Affichée à l'utilisateur lors de la première demande d'autorisation -->
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>DisplayPAD a besoin d'accéder à l'écran pour le diffuser sur votre iPad.</string>
+
+    <!-- Version minimale de macOS requise (ScreenCaptureKit requiert 12.3+) -->
+    <key>LSMinimumSystemVersion</key>
+    <string>12.3</string>
+
+    <!-- Icône de l'application (fichier .icns à créer en v0.2) -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+
+    <!-- Localisation principale -->
+    <key>CFBundleDevelopmentRegion</key>
+    <string>fr</string>
+
+    <!-- Localisations supportées -->
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>fr</string>
+        <string>en</string>
+    </array>
+
+    <!-- Droits réseau sortants (connexion TCP vers iproxy) -->
+    <!-- Note : ces clés sont indicatives ; les entitlements réels sont dans le .entitlements -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <!-- Connexion locale uniquement (127.0.0.1 via iproxy) — pas besoin d'ATS -->
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

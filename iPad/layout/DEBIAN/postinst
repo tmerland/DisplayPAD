@@ -1,0 +1,6 @@
+#!/bin/bash
+# postinst — Script exécuté après l'installation du paquet DisplayPAD
+# Note : ce fichier doit être exécutable (chmod +x layout/DEBIAN/postinst)
+
+echo "DisplayPAD installé avec succès"
+echo "Lancez DisplayPAD depuis SpringBoard"

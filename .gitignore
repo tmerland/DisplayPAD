@@ -1,0 +1,18 @@
+# DisplayPAD — Git ignore rules
+
+# iOS / Theos build artefacts
+*.deb
+
+# Build directories
+build/
+DerivedData/
+
+# Xcode user state
+*.xcuserstate
+
+# macOS metadata
+.DS_Store
+
+# Compiled object & archive files
+*.o
+*.a

@@ -1,71 +1,230 @@
-# DisplayPad : iPad Air 1 comme écran externe du Mac via USB
+# DisplayPAD
 
-## 1. Contexte et objectif
+![Version](https://img.shields.io/badge/version-v0.1.0-blue) ![Platform Mac](https://img.shields.io/badge/platform-macOS-lightgrey) ![Platform iPad](https://img.shields.io/badge/platform-iOS%2012.5-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green)
 
-Les solutions permettant d'utiliser un iPad comme second écran (Duet Display, Luna Display, etc.) sont payantes. L'objectif est de réaliser une alternative **gratuite et open source**, fonctionnant par **câble USB** (latence faible, sans Wi-Fi), en s'appuyant sur un **iPad Air 1 jailbreaké** (iOS 12.5.8) qui permet d'installer une application sans App Store ni signature développeur.
+> **Turn a jailbroken iPad Air into a wired USB second display — for free.**
+> DisplayPAD is an open-source alternative to Duet Display that uses a Lightning cable and your existing USB stack instead of a paid subscription.
 
-| Élément | Choix |
-|---|---|
-| Récepteur | iPad Air 1 (A7), iOS 12.5.8, jailbreaké |
-| Émetteur | Mac sous macOS Tahoe 26.2 |
-| Liaison | USB (Lightning) via `usbmuxd` |
-| Distribution | Paquet `.deb` installable depuis Sileo (identifiant du type `com.<pseudo>.displaypad`) |
-| Éditeur | VS Code |
+---
 
-## 2. Architecture
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Installation — Mac](#installation--mac)
+- [Installation — iPad](#installation--ipad)
+- [Build](#build)
+- [Test PoC](#test-poc)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Overview
+
+| Component | Stack | Notes |
+|-----------|-------|-------|
+| **Mac app** | Swift / SwiftUI | Menu-bar app; captures the display, encodes H.264, pushes frames over USB |
+| **iPad app** | Objective-C / Theos | Cydia/Sileo `.deb`; receives frames, decodes with VideoToolbox, renders full-screen |
+| **Transport** | `usbmuxd` → TCP port 7000 | No Wi-Fi needed; `iproxy` tunnels the connection over Lightning |
+| **Codec** | H.264 Annex-B | Hardware encode on Mac (VideoToolbox), hardware decode on iPad |
+
+---
+
+## Architecture
 
 ```
-Mac (émetteur)                              iPad (récepteur)
- écran virtuel → capture → encodage H.264    décodage matériel → affichage plein écran
-                          ↓  TCP via USB  ↑
-                              usbmuxd
-                          (touches → Mac)
+MacBook Pro                                   iPad Air (jailbroken)
+┌──────────────────────────────┐  USB / Lightning  ┌──────────────────────────────┐
+│  DisplayPADMac (menu-bar)    │                   │  DisplayPAD.app (Theos .deb) │
+│                              │                   │                              │
+│  ┌────────────────┐          │                   │  ┌────────────────┐          │
+│  │ Screen capture │          │                   │  │ VideoToolbox   │          │
+│  │ (ScreenCaptureKit)        │                   │  │ H.264 decoder  │          │
+│  └───────┬────────┘          │                   │  └───────┬────────┘          │
+│          │ CMSampleBuffer    │                   │          │ CVPixelBuffer      │
+│  ┌───────▼────────┐          │                   │  ┌───────▼────────┘          │
+│  │ VideoToolbox   │          │                   │  │ CALayer / OpenGL ES        │
+│  │ H.264 encoder  │          │                   │  │ full-screen renderer        │
+│  └───────┬────────┘          │                   │  └────────────────────────────│
+│          │ H.264 Annex-B     │   DP protocol     │          ▲                   │
+│  ┌───────▼────────┐          │  ──────────────►  │  ┌───────┴────────┐          │
+│  │ TCP socket     │          │  TCP :7000        │  │ TCP socket     │          │
+│  │ (DPHeader +   │          │◄──────────────    │  │ (DPHeader +   │          │
+│  │  payload)      │          │   HELLO / CONFIG  │  │  payload)      │          │
+│  └────────────────┘          │                   │  └────────────────┘          │
+│                              │                   │                              │
+│         iproxy 7000:7000     │◄─────────────────►│        usbmuxd              │
+└──────────────────────────────┘    usbmuxd/USB    └──────────────────────────────┘
 ```
 
-## 3. Composants
+**Binary protocol** (`Shared/Protocol.h`):
+```
+[ DPHeader (12 bytes) ][ payload (0…N bytes) ]
+  magic=0x44505044 "DPPD"
+  type = HELLO | HELLO_ACK | CONFIG | CONFIG_ACK | FRAME | PING | PONG | DISCONNECT
+  length = payload byte count (0 for control packets)
+```
+All integers are big-endian (network byte order).
 
-### 3.1 Transport USB
-- `usbmuxd`, déjà présent sur macOS, crée un tunnel TCP à travers le câble.
-- L'application iPad écoute sur un port local (ex. `7000`) ; le Mac s'y connecte via le socket `/var/run/usbmuxd`.
-- Pour les premiers tests : `iproxy 7000:7000` (paquet `libimobiledevice`, via Homebrew).
+---
 
-### 3.2 Application Mac (émetteur, Swift)
-- **Écran virtuel** : `CGVirtualDisplay` (API privée) afin que macOS voie un vrai deuxième écran. Le projet open source DeskPad sert de référence ; sa compatibilité avec Tahoe 26.2 reste à vérifier.
-- **Capture** : ScreenCaptureKit (`SCStream`), nécessite l'autorisation « Enregistrement de l'écran ».
-- **Encodage** : VideoToolbox (`VTCompressionSession`), H.264 temps réel, sans B-frames, keyframe toutes les 1 à 2 s.
-- **Interface** : application de barre des menus.
+## Installation — Mac
 
-### 3.3 Application iPad (récepteur, Objective-C / Theos)
-- Lecture du flux TCP et découpage en NAL units.
-- Affichage via `AVSampleBufferDisplayLayer` (décodage matériel).
-- Plein écran, veille désactivée (`idleTimerDisabled`), orientation verrouillée.
-- Compilation avec **Theos** (template `iphone/application`), sortie en `.deb` via `make package`.
+### Prerequisites
 
-### 3.4 Tactile (optionnel)
-- L'iPad renvoie les événements tactiles au Mac, injectés avec `CGEvent`.
-- Nécessite l'autorisation Accessibilité côté Mac.
+```bash
+# Homebrew
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-## 4. Plan de réalisation
+# libimobiledevice (provides iproxy, ideviceinfo…)
+brew install libimobiledevice
 
-1. **Preuve de concept** : VNC sur le Mac, client VNC sur l'iPad, tunnel `iproxy` pour mesurer la latence.
-2. **Récepteur iPad minimal** : socket TCP + affichage d'un flux H.264.
-3. **Validation du récepteur** : envoi d'un flux de test depuis le Mac avec `ffmpeg` sur `localhost:7000`.
-4. **Émetteur Mac** : capture, encodage, envoi du flux.
-5. **Écran virtuel** `CGVirtualDisplay`.
-6. **Tactile** et finitions.
-7. **Packaging** : génération du dépôt (`dpkg-scanpackages`, fichiers `Packages` / `Release`) et publication pour Sileo.
+# Xcode (from the App Store) — required to build & run the Mac app
+```
 
-## 5. Risques et points de vigilance
+### Trust the iPad
 
-- **API privée** `CGVirtualDisplay` : non documentée, susceptible de changer. Solution de repli : capturer un écran existant ou utiliser un émulateur HDMI.
-- **Latence** : à surveiller (encodage temps réel, taille du tampon).
-- **Jailbreak** : non permanent, à relancer après chaque redémarrage de l'iPad.
-- **Matériel ancien** : batterie de plus de 10 ans, chaleur à gérer en usage prolongé.
-- **Toolchain** : Xcode 26 ne cible plus bien iOS 12 ; l'app iPad se compile avec Theos.
+Connect the iPad via Lightning, unlock it and tap **Trust** when prompted.  
+Verify detection:
 
-## 6. Livrables attendus
+```bash
+ideviceinfo -u $(ideviceinfo -l | head -1) | grep DeviceName
+```
 
-- **DisplayPad (Mac)** : application de barre des menus émettrice.
-- **DisplayPad (iPad)** : application réceptrice, empaquetée en `.deb`.
-- Dépôt Sileo personnel hébergeant le paquet.
-- Documentation d'installation et d'utilisation.
+---
+
+## Installation — iPad
+
+### Prerequisites
+
+| Requirement | Details |
+|-------------|---------|
+| iPad Air 1 | A1474 / A1475 / A1476 |
+| iOS version | 12.5.7 or 12.5.8 |
+| Jailbreak | [Chimera](https://chimera.coolstar.org/) (unc0ver also works) |
+| Package manager | [Sileo](https://getsileo.app/) |
+| Theos dependencies | `apt install theos` via Sileo (BigBoss repo) |
+
+### Install the .deb
+
+Once built (see [Build](#build)):
+
+```bash
+# Copy to iPad
+scp iPad/build/displaypad_0.1_iphoneos-arm.deb root@<iPad-IP>:/tmp/
+
+# SSH into iPad and install
+ssh root@<iPad-IP>
+dpkg -i /tmp/displaypad_0.1_iphoneos-arm.deb
+uicache          # refresh SpringBoard
+```
+
+Or install via Sileo by sideloading the `.deb` directly.
+
+---
+
+## Build
+
+### Mac app
+
+```bash
+cd Mac/DisplayPADMac
+open DisplayPADMac.xcodeproj   # then ⌘B to build, ⌘R to run
+```
+
+Requires **Xcode 15+**, target **macOS 13+**.
+
+### iPad app (Theos)
+
+```bash
+# Install Theos on macOS (cross-compile for arm)
+export THEOS=~/theos
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+
+cd iPad
+make package   # produces layout/*.deb
+make install   # scp + dpkg if THEOS_DEVICE_IP is set
+```
+
+Set `THEOS_DEVICE_IP` and `THEOS_DEVICE_PORT` in your environment to point at the iPad's SSH server.
+
+---
+
+## Test PoC
+
+The `Scripts/test_stream.sh` script lets you verify the entire USB + ffmpeg pipeline **without** building either app:
+
+```bash
+# Make executable (once)
+chmod +x Scripts/test_stream.sh
+
+# Run (iPad must be connected via USB)
+./Scripts/test_stream.sh
+```
+
+What it does:
+1. Verifies `iproxy` and `ffmpeg` are installed.
+2. Launches `iproxy 7000:7000` to tunnel USB → TCP.
+3. Streams a synthetic `testsrc2` H.264 feed (1024×768 @ 30 fps) to `localhost:7000`.
+4. Cleans up `iproxy` on exit (Ctrl+C safe).
+
+On the iPad side, any TCP listener on port 7000 (e.g. `nc -l 7000 > /tmp/stream.h264`) can capture the raw stream.
+
+---
+
+## Roadmap
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| **v0.1 — PoC** | Folder structure, shared protocol header, test stream script | 🟡 In progress |
+| **v0.2 — Mac sender** | SwiftUI menu-bar app, screen capture via ScreenCaptureKit, H.264 encoding, TCP send with DP protocol | ⬜ Planned |
+| **v0.3 — Virtual screen** | Register a virtual display on macOS so the iPad appears as a real external monitor | ⬜ Planned |
+| **v0.4 — Full protocol** | iPad Theos receiver, VideoToolbox decode, full-screen renderer, HELLO/CONFIG handshake | ⬜ Planned |
+| **v1.0 — Release** | Stability, auto-reconnect, Sileo package, notarised Mac app, public release | ⬜ Planned |
+| **v2.0 — Touch input** | Forward iPad touch events back to Mac as HID pointer/keyboard events | ⬜ Planned |
+
+---
+
+## Contributing
+
+Contributions are welcome!
+
+1. Fork the repository.
+2. Create a feature branch: `git checkout -b feat/my-feature`.
+3. Commit your changes: `git commit -m "feat: my feature"`.
+4. Push and open a Pull Request.
+
+Please follow the existing code style and add tests where applicable.  
+For major changes, open an issue first to discuss the approach.
+
+---
+
+## License
+
+This project is licensed under the **MIT License**.
+
+```
+MIT License
+
+Copyright (c) 2026 DisplayPAD Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

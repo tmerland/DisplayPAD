@@ -3,8 +3,8 @@ Name: DisplayPAD
 Depends: firmware (>= 9.0)
 Version: 0.1.0
 Architecture: iphoneos-arm
-Description: Second screen for Mac via USB
+Description: Turn your iPad into a wired second screen for Mac via Lightning/USB. Hardware-accelerated H.264 decoding.
 Homepage: https://github.com/tmerland/DisplayPAD
-Maintainer: tmerland
-Author: tmerland
+Maintainer: Thibault Merland
+Author: Thibault Merland
 Section: Utilities

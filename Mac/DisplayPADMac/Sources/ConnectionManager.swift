@@ -111,7 +111,17 @@ class ConnectionManager: ObservableObject {
     @Published var currentFPS: Double = 0.0
     @Published var currentBitrate: Double = 0.0
     @Published var batteryLevel: Int = -1
-    @Published var currentLatency: Double = 0.0  // -1 = inconnu
+    @Published var currentLatency: Double = 0.0
+    @Published var isConnecting: Bool = false
+
+    /// Active ou désactive la tentative continue de reconnexion automatique
+    var autoReconnectEnabled: Bool = true
+
+    /// Indique si la déconnexion a été volontairement demandée par l'utilisateur
+    private var isUserInitiatedDisconnect: Bool = false
+
+    /// Timer de reconnexion périodique
+    private var reconnectTimer: Timer?
 
     // MARK: Callbacks de session (appelés sur le thread principal)
 
@@ -142,9 +152,23 @@ class ConnectionManager: ObservableObject {
     // MARK: - Interface publique
 
     /// Établit la connexion TCP vers 127.0.0.1:port
-    func connect(port: Int = 7000) {
+    func connect(port: Int = 7100) {
+        isUserInitiatedDisconnect = false
+        stopReconnectTimer()
+        startConnectionAttempt(port: port)
+    }
+
+    private func startConnectionAttempt(port: Int) {
         guard !isConnected else { return }
         currentPort = port
+
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+
+        DispatchQueue.main.async { [weak self] in
+            self?.isConnecting = true
+        }
 
         let host = NWEndpoint.Host("127.0.0.1")
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
@@ -152,24 +176,35 @@ class ConnectionManager: ObservableObject {
             return
         }
 
-        connection = NWConnection(host: host, port: nwPort, using: .tcp)
-        connection?.stateUpdateHandler = { [weak self] state in
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.connectionTimeout = 2
+        tcpOptions.enableKeepalive = true
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
+
+        let conn = NWConnection(host: host, port: nwPort, using: params)
+        conn.stateUpdateHandler = { [weak self] state in
             self?.handleConnectionState(state)
         }
-        connection?.start(queue: networkQueue)
+        connection = conn
+        conn.start(queue: networkQueue)
     }
 
-    /// Ferme la connexion proprement
+    /// Ferme la connexion volontairement
     func disconnect() {
+        isUserInitiatedDisconnect = true
+        stopReconnectTimer()
         sendPacket(type: .disconnect, payload: Data())
         stopPingTimer()
+        connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
         DispatchQueue.main.async { [weak self] in
             self?.isConnected = false
+            self?.isConnecting = false
             self?.deviceName = ""
             self?.currentFPS = 0
             self?.currentBitrate = 0
+            self?.currentLatency = 0
             self?.batteryLevel = -1
             self?.onDisconnected?()
         }
@@ -216,24 +251,30 @@ class ConnectionManager: ObservableObject {
         case .ready:
             print("[ConnectionManager] Connexion établie sur le port \(currentPort)")
             DispatchQueue.main.async { [weak self] in
-                self?.isConnected = true
-                self?.deviceName = "iPad Air 1"
+                guard let self = self else { return }
+                self.stopReconnectTimer()
+                self.isConnecting = false
+                self.isConnected = true
+                self.deviceName = "iPad Air"
             }
             sendHello()
             startPingTimer()
             startReceiving()
 
         case .failed(let error):
-            print("[ConnectionManager] Échec de connexion : \(error)")
-            DispatchQueue.main.async { [weak self] in
-                self?.isConnected = false
-            }
+            print("[ConnectionManager] Tentative de connexion au port \(currentPort) : \(error.localizedDescription)")
+            handleDisconnect()
 
         case .cancelled:
-            print("[ConnectionManager] Connexion annulée")
+            print("[ConnectionManager] Connexion fermée")
 
         case .waiting(let error):
-            print("[ConnectionManager] En attente : \(error)")
+            print("[ConnectionManager] En attente de l'iPad : \(error.localizedDescription)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                if self?.isConnected == false {
+                    self?.handleDisconnect()
+                }
+            }
 
         default:
             break
@@ -337,10 +378,43 @@ class ConnectionManager: ObservableObject {
 
     private func handleDisconnect() {
         stopPingTimer()
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+
         DispatchQueue.main.async { [weak self] in
-            self?.isConnected = false
-            self?.deviceName = ""
-            self?.onDisconnected?()
+            guard let self = self else { return }
+            self.isConnected = false
+            self.deviceName = ""
+            self.currentFPS = 0
+            self.currentBitrate = 0
+            self.currentLatency = 0
+            self.onDisconnected?()
+
+            if self.autoReconnectEnabled && !self.isUserInitiatedDisconnect {
+                self.scheduleReconnect()
+            } else {
+                self.isConnecting = false
+            }
         }
+    }
+
+    private func scheduleReconnect() {
+        guard reconnectTimer == nil, !isConnected, !isUserInitiatedDisconnect else { return }
+        isConnecting = true
+        print("[ConnectionManager] Reconnexion automatique dans 1.5s...")
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if self.isConnected || self.isUserInitiatedDisconnect {
+                self.stopReconnectTimer()
+            } else {
+                self.startConnectionAttempt(port: self.currentPort)
+            }
+        }
+    }
+
+    private func stopReconnectTimer() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
     }
 }

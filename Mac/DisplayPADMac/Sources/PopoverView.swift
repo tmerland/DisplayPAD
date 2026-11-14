@@ -82,8 +82,11 @@ struct PopoverView: View {
 
             Spacer()
 
-            // Indicateur de statut animé (vert = connecté, rouge = déconnecté)
-            IndicateurStatut(connecte: connectionManager.isConnected)
+            // Indicateur de statut animé (vert = connecté, orange = recherche, rouge = déconnecté)
+            IndicateurStatut(
+                connecte: connectionManager.isConnected,
+                enRecherche: connectionManager.isConnecting
+            )
         }
     }
 
@@ -93,11 +96,11 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 8) {
             // Nom du device
             HStack {
-                Image(systemName: connectionManager.isConnected ? "ipad" : "ipad.slash")
-                    .foregroundStyle(connectionManager.isConnected ? Color.accentColor : .secondary)
+                Image(systemName: connectionManager.isConnected ? "ipad" : (connectionManager.isConnecting ? "antenna.radiowaves.left.and.right" : "ipad.slash"))
+                    .foregroundStyle(connectionManager.isConnected ? Color.green : (connectionManager.isConnecting ? Color.orange : Color.secondary))
                 Text(connectionManager.isConnected
-                     ? connectionManager.deviceName.isEmpty ? "iPad Air 1 connecté" : connectionManager.deviceName
-                     : "iPad : Non détecté")
+                     ? "\(connectionManager.deviceName.isEmpty ? "iPad" : connectionManager.deviceName) connecté"
+                     : (connectionManager.isConnecting ? "Recherche de l'iPad en cours…" : "iPad : Déconnecté"))
                     .font(.subheadline)
                     .foregroundStyle(connectionManager.isConnected ? .primary : .secondary)
                 Spacer()
@@ -105,18 +108,18 @@ struct PopoverView: View {
 
             // Bouton Connecter / Déconnecter
             Button {
-                if connectionManager.isConnected {
+                if connectionManager.isConnected || connectionManager.isConnecting {
                     connectionManager.disconnect()
                 } else {
                     connectionManager.connect(port: settings.tcpPort)
                 }
             } label: {
-                Text(connectionManager.isConnected ? "Déconnecter" : "Connecter")
+                Text(connectionManager.isConnected ? "Déconnecter" : (connectionManager.isConnecting ? "Arrêter la recherche" : "Connecter"))
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.regular)
-            .tint(connectionManager.isConnected ? .red : .accentColor)
+            .tint(connectionManager.isConnected ? .red : (connectionManager.isConnecting ? .orange : .accentColor))
         }
     }
 
@@ -224,35 +227,40 @@ struct PopoverView: View {
 
 // MARK: - Composants réutilisables
 
-/// Indicateur de statut animé (cercle vert/rouge)
+/// Indicateur de statut animé (vert = connecté, orange = recherche, rouge = déconnecté)
 struct IndicateurStatut: View {
 
     let connecte: Bool
+    var enRecherche: Bool = false
     @State private var pulse = false
 
     var body: some View {
+        let couleur: Color = connecte ? .green : (enRecherche ? .orange : .red)
         ZStack {
             Circle()
-                .fill(connecte ? Color.green.opacity(0.25) : Color.red.opacity(0.25))
+                .fill(couleur.opacity(0.25))
                 .frame(width: 20, height: 20)
                 .scaleEffect(pulse ? 1.4 : 1.0)
                 .opacity(pulse ? 0 : 1)
                 .animation(
-                    connecte
-                        ? .easeInOut(duration: 1.5).repeatForever(autoreverses: false)
+                    (connecte || enRecherche)
+                        ? .easeInOut(duration: 1.2).repeatForever(autoreverses: false)
                         : .default,
                     value: pulse
                 )
 
             Circle()
-                .fill(connecte ? Color.green : Color.red)
+                .fill(couleur)
                 .frame(width: 10, height: 10)
         }
         .onAppear {
-            if connecte { pulse = true }
+            if connecte || enRecherche { pulse = true }
         }
         .onChange(of: connecte) { _, newValue in
-            pulse = newValue
+            pulse = newValue || enRecherche
+        }
+        .onChange(of: enRecherche) { _, newValue in
+            pulse = newValue || connecte
         }
     }
 }

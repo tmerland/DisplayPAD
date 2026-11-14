@@ -7,7 +7,7 @@
 import AppKit
 import SwiftUI
 
-@main
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Propriétés
@@ -24,6 +24,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Paramètres de l'application partagés
     private let appSettings = AppSettings()
 
+    /// Moteur de capture + encodage H.264
+    private let streamingEngine = StreamingEngine()
+
+    /// Écran virtuel (API privée CGVirtualDisplay)
+    private let virtualDisplay = VirtualDisplayManager()
+
     /// Moniteur d'événements globaux (pour fermer le popover au clic extérieur)
     private var eventMonitor: Any?
 
@@ -32,6 +38,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         configurerStatusItem()
         configurerPopover()
+        configurerSession()
+        // Déclenche la demande d'autorisation « Enregistrement de l'écran »
+        if !CGPreflightScreenCaptureAccess() {
+            print("[App] Autorisation d'enregistrement de l'écran absente — demande en cours")
+            _ = CGRequestScreenCaptureAccess()
+        }
         // Lance la connexion au démarrage si l'auto-reconnect est activé
         if appSettings.autoReconnect {
             connectionManager.connect(port: appSettings.tcpPort)
@@ -39,9 +51,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        streamingEngine.stopCapture()
+        virtualDisplay.destroyVirtualDisplay()
         connectionManager.disconnect()
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+    }
+
+    // MARK: - Session de streaming
+
+    /// HELLO_ACK → CONFIG ; CONFIG_ACK → écran virtuel + capture ; déconnexion → arrêt.
+    private func configurerSession() {
+        streamingEngine.delegate = self
+
+        // Synchroniser les statistiques réelles vers ConnectionManager (affichées dans le Popover)
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.connectionManager.currentFPS = self.streamingEngine.measuredFPS
+            self.connectionManager.currentBitrate = self.streamingEngine.measuredBitrate
+        }
+
+        connectionManager.onHelloAck = { [weak self] in
+            guard let self else { return }
+            self.connectionManager.sendConfig(settings: self.appSettings)
+        }
+        connectionManager.onConfigAck = { [weak self] in
+            guard let self else { return }
+            let w = UInt32(self.appSettings.actualWidth)
+            let h = UInt32(self.appSettings.actualHeight)
+            // Écran virtuel si disponible, sinon repli sur l'écran principal
+            let id = self.virtualDisplay.createVirtualDisplay(width: w, height: h, ppi: 264)
+                ?? CGMainDisplayID()
+            self.streamingEngine.startCapture(displayID: id, settings: self.appSettings)
+        }
+        connectionManager.onDisconnected = { [weak self] in
+            self?.streamingEngine.stopCapture()
+            self?.virtualDisplay.destroyVirtualDisplay()
         }
     }
 
@@ -104,5 +150,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(monitor)
             eventMonitor = nil
         }
+    }
+}
+
+
+// MARK: - StreamingEngineDelegate
+
+extension AppDelegate: StreamingEngineDelegate {
+    nonisolated func didEncodeFrame(data: Data) {
+        Task { @MainActor in self.connectionManager.sendFrame(data) }
     }
 }

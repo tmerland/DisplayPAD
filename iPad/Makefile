@@ -6,7 +6,7 @@ DisplayPAD_FILES = Sources/main.m Sources/AppDelegate.m Sources/DisplayViewContr
 DisplayPAD_FRAMEWORKS = UIKit AVFoundation CoreMedia VideoToolbox
 DisplayPAD_PRIVATE_FRAMEWORKS =
 DisplayPAD_CFLAGS = -fobjc-arc
-DisplayPAD_ARCHS = armv7 armv7s arm64
+DisplayPAD_ARCHS = arm64
 IPHONE_DEPLOYMENT_TARGET = 9.0
 
 include $(THEOS_MAKE_PATH)/application.mk

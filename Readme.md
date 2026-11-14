@@ -1,5 +1,9 @@
 # DisplayPAD
 
+<p align="center">
+  <img src="Images/social-preview.png" alt="DisplayPAD" width="800">
+</p>
+
 ![Version](https://img.shields.io/badge/version-v0.1.0-blue) ![Platform Mac](https://img.shields.io/badge/platform-macOS-lightgrey) ![Platform iPad](https://img.shields.io/badge/platform-iOS%2012.5-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green)
 
 > **Turn a jailbroken iPad Air into a wired USB second display — for free.**
@@ -178,11 +182,11 @@ On the iPad side, any TCP listener on port 7000 (e.g. `nc -l 7000 > /tmp/stream.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
-| **v0.1 — PoC** | Folder structure, shared protocol header, test stream script | 🟡 In progress |
-| **v0.2 — Mac sender** | SwiftUI menu-bar app, screen capture via ScreenCaptureKit, H.264 encoding, TCP send with DP protocol | ⬜ Planned |
-| **v0.3 — Virtual screen** | Register a virtual display on macOS so the iPad appears as a real external monitor | ⬜ Planned |
-| **v0.4 — Full protocol** | iPad Theos receiver, VideoToolbox decode, full-screen renderer, HELLO/CONFIG handshake | ⬜ Planned |
-| **v1.0 — Release** | Stability, auto-reconnect, Sileo package, notarised Mac app, public release | ⬜ Planned |
+| **v0.1 — PoC** | Folder structure, shared protocol header, test stream script | ✅ Done |
+| **v0.2 — Mac sender** | SwiftUI menu-bar app, ScreenCaptureKit capture + cursor, VideoToolbox H.264 hardware encode, live stats | ✅ Done & Tested |
+| **v0.3 — Virtual screen** | CGVirtualDisplay virtual display on macOS with HiDPI Retina support and multiple resolution presets | ✅ Done & Tested |
+| **v0.4 — iPad Receiver** | Native Theos app, AVSampleBufferDisplayLayer hardware decoding, auto-handshake over USB | ✅ Done & Tested |
+| **v1.0 — Release** | Stability, auto-reconnect, Sileo package, branding & icons, public release | 🟡 In progress |
 | **v2.0 — Touch input** | Forward iPad touch events back to Mac as HID pointer/keyboard events | ⬜ Planned |
 
 ---

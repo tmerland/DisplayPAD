@@ -44,6 +44,8 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
 @property (nonatomic, strong) NSData  *spsData;   // Derniers SPS reçus
 @property (nonatomic, strong) NSData  *ppsData;   // Derniers PPS reçus
 @property (nonatomic, strong) NSTimer *overlayTimer;
+@property (nonatomic, assign) CMVideoFormatDescriptionRef cachedFormatDesc;
+@property (nonatomic, assign) BOOL formatDescNeedsUpdate;
 @end
 
 // ─── Implémentation ──────────────────────────────────────────────────────────
@@ -173,8 +175,6 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
 - (CMVideoFormatDescriptionRef)createFormatDescriptionFromSPS:(NSData *)sps pps:(NSData *)pps {
     const uint8_t *spsBytes = sps.bytes;
     const uint8_t *ppsBytes = pps.bytes;
-    size_t spsSizes[1] = { sps.length };
-    size_t ppsSizes[1] = { pps.length };
     const uint8_t *paramSets[2] = { spsBytes, ppsBytes };
     size_t  paramSizes[2]       = { sps.length, pps.length };
 
@@ -217,13 +217,14 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
 /// Crée un CMSampleBuffer H.264 depuis des données AVCC et un CMVideoFormatDescription.
 - (CMSampleBufferRef)createSampleBufferFromAVCCData:(NSData *)avccData
                                       formatDesc:(CMVideoFormatDescriptionRef)formatDesc {
-    // Créer le CMBlockBuffer depuis les données AVCC
+    if (!avccData || avccData.length == 0 || !formatDesc) return NULL;
+
     CMBlockBufferRef blockBuffer = NULL;
     OSStatus status = CMBlockBufferCreateWithMemoryBlock(
         kCFAllocatorDefault,
-        (void *)avccData.bytes,  // Données source
+        NULL,                    // Alloue un nouveau bloc mémoire indépendant
         avccData.length,
-        kCFAllocatorNull,        // Pas de libération (NSData gère sa mémoire)
+        kCFAllocatorDefault,
         NULL,
         0,
         avccData.length,
@@ -231,38 +232,51 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
         &blockBuffer
     );
 
-    if (status != kCMBlockBufferNoErr) {
+    if (status != kCMBlockBufferNoErr || !blockBuffer) {
         NSLog(@"[DisplayVC] Erreur CMBlockBufferCreateWithMemoryBlock : %d", (int)status);
         return NULL;
     }
 
-    // Paramètres temporels — temps invalide pour lecture au plus tôt (live)
+    status = CMBlockBufferReplaceDataBytes(avccData.bytes, blockBuffer, 0, avccData.length);
+    if (status != kCMBlockBufferNoErr) {
+        NSLog(@"[DisplayVC] Erreur CMBlockBufferReplaceDataBytes : %d", (int)status);
+        CFRelease(blockBuffer);
+        return NULL;
+    }
+
+    // Paramètres temporels — temps invalide pour lecture immédiate (live)
     CMSampleTimingInfo timingInfo = {
         .duration               = kCMTimeInvalid,
         .presentationTimeStamp  = kCMTimeInvalid,
         .decodeTimeStamp        = kCMTimeInvalid
     };
 
-    // Créer le CMSampleBuffer
     CMSampleBufferRef sampleBuffer = NULL;
     size_t sampleSize = avccData.length;
     status = CMSampleBufferCreateReady(
         kCFAllocatorDefault,
         blockBuffer,
         formatDesc,
-        1,            // Nombre de samples
-        1,            // Nombre de timing infos
+        1,
+        1,
         &timingInfo,
-        1,            // Nombre de tailles de samples
+        1,
         &sampleSize,
         &sampleBuffer
     );
 
     CFRelease(blockBuffer);
 
-    if (status != noErr) {
+    if (status != noErr || !sampleBuffer) {
         NSLog(@"[DisplayVC] Erreur CMSampleBufferCreateReady : %d", (int)status);
         return NULL;
+    }
+
+    // CRUCIAL pour AVSampleBufferDisplayLayer sans timebase : affichage immédiat
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, YES);
+    if (attachments && CFArrayGetCount(attachments) > 0) {
+        CFMutableDictionaryRef dict = (CFMutableDictionaryRef)CFArrayGetValueAtIndex(attachments, 0);
+        CFDictionarySetValue(dict, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
     }
 
     return sampleBuffer;
@@ -295,23 +309,19 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
 - (void)tcpReceiver:(TCPReceiver *)receiver didReceiveFrame:(NSData *)nalData {
     if (nalData.length == 0) return;
 
-    const uint8_t *bytes = nalData.bytes;
-    NSUInteger length    = nalData.length;
-
     // ── Étape 1 : Parser les NAL units pour détecter SPS/PPS ───────────────
     NSArray<NSData *> *nalUnits = [self parseNALUnitsFromData:nalData];
-    BOOL foundSPS = NO, foundPPS = NO;
 
     for (NSData *nal in nalUnits) {
         if (nal.length == 0) continue;
         uint8_t nalType = ((uint8_t *)nal.bytes)[0] & 0x1F;
         if (nalType == 7) { // SPS
             self.spsData = nal;
-            foundSPS = YES;
+            self.formatDescNeedsUpdate = YES;
             NSLog(@"[DisplayVC] SPS reçu (%lu bytes)", (unsigned long)nal.length);
         } else if (nalType == 8) { // PPS
             self.ppsData = nal;
-            foundPPS = YES;
+            self.formatDescNeedsUpdate = YES;
             NSLog(@"[DisplayVC] PPS reçu (%lu bytes)", (unsigned long)nal.length);
         }
     }
@@ -322,42 +332,51 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
         return;
     }
 
-    // ── Étape 3 : Créer/récupérer le CMVideoFormatDescription ──────────────
-    CMVideoFormatDescriptionRef formatDesc = [self createFormatDescriptionFromSPS:self.spsData
-                                                                              pps:self.ppsData];
-    if (!formatDesc) {
-        NSLog(@"[DisplayVC] Impossible de créer le format description — frame ignorée");
+    // ── Étape 3 : Créer/récupérer le CMVideoFormatDescription mis en cache ─
+    if (!self.cachedFormatDesc || self.formatDescNeedsUpdate) {
+        if (self.cachedFormatDesc) {
+            CFRelease(self.cachedFormatDesc);
+            self.cachedFormatDesc = NULL;
+        }
+        self.cachedFormatDesc = [self createFormatDescriptionFromSPS:self.spsData pps:self.ppsData];
+        self.formatDescNeedsUpdate = NO;
+        NSLog(@"[DisplayVC] Nouveau CMVideoFormatDescription créé");
+    }
+
+    if (!self.cachedFormatDesc) {
+        NSLog(@"[DisplayVC] Format description absent — frame ignorée");
         return;
     }
 
     // ── Étape 4 : Convertir Annex B → AVCC ─────────────────────────────────
     NSData *avccData = [self convertAnnexBToAVCC:nalData];
     if (avccData.length == 0) {
-        CFRelease(formatDesc);
         return; // Frame SPS/PPS pure sans données VCL
     }
 
     // ── Étape 5 : Créer le CMSampleBuffer ───────────────────────────────────
     CMSampleBufferRef sampleBuffer = [self createSampleBufferFromAVCCData:avccData
-                                                               formatDesc:formatDesc];
-    CFRelease(formatDesc);
-
+                                                               formatDesc:self.cachedFormatDesc];
     if (!sampleBuffer) {
         NSLog(@"[DisplayVC] Impossible de créer le CMSampleBuffer");
         return;
     }
 
+    // ── Masquer l'overlay à la première image valide ───────────────────────
+    if (self.overlayLabel.alpha > 0.0) {
+        [self hideOverlay];
+    }
+
     // ── Étape 6 : Enqueuer sur AVSampleBufferDisplayLayer ───────────────────
     if (self.displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed) {
         NSError *err = self.displayLayer.error;
-        NSLog(@"[DisplayVC] Layer en erreur : %@ — flush et réinitialisation", err.localizedDescription);
+        NSLog(@"[DisplayVC] Layer en erreur : %@ — flush", err.localizedDescription);
         [self.displayLayer flushAndRemoveImage];
     }
 
     [self.displayLayer enqueueSampleBuffer:sampleBuffer];
 
-    // ── Nettoyage propre ─────────────────────────────────────────────────────
-    CMSampleBufferInvalidate(sampleBuffer);
+    // Ne JAMAIS appeler CMSampleBufferInvalidate ici : enqueueSampleBuffer est asynchrone !
     CFRelease(sampleBuffer);
 }
 
@@ -365,6 +384,10 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
 
 - (void)dealloc {
     [self.receiver stopListening];
+    if (self.cachedFormatDesc) {
+        CFRelease(self.cachedFormatDesc);
+        self.cachedFormatDesc = NULL;
+    }
     if (self.decompressionSession) {
         VTDecompressionSessionInvalidate(self.decompressionSession);
         CFRelease(self.decompressionSession);

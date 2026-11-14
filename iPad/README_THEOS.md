@@ -41,7 +41,10 @@ mkdir -p $THEOS/sdks
 tar -xf iPhoneOS12.4.sdk.tar.xz -C $THEOS/sdks/
 ```
 
-> **Note** : Pour armv7 (iPad Air 1), l'iOS 12 SDK suffit.
+> **Note** : l'iPad Air 1 (A7) est en **arm64** ; le Makefile ne cible que arm64 (armv7 ne compile plus avec les clang récents).
+>
+> Avec un clang récent (Xcode 15+), renommer les `module.map` du SDK en `module.modulemap` :
+> `find $THEOS/sdks/iPhoneOS12.4.sdk -name module.map -execdir mv module.map module.modulemap \;`
 
 ---
 

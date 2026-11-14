@@ -172,6 +172,11 @@ struct PopoverView: View {
                 label: "Bitrate",
                 valeur: formaterBitrate(connectionManager.currentBitrate)
             )
+            Spacer()
+            LigneStatistique(
+                label: "Latence",
+                valeur: String(format: "%.0f ms", connectionManager.currentLatency)
+            )
             if settings.showBattery && connectionManager.batteryLevel >= 0 {
                 Spacer()
                 LigneStatistique(label: "Batterie", valeur: "\(connectionManager.batteryLevel)%")
@@ -297,8 +302,3 @@ struct LigneStatistique: View {
     }
 }
 
-#Preview {
-    PopoverView()
-        .environmentObject(AppSettings())
-        .environmentObject(ConnectionManager())
-}

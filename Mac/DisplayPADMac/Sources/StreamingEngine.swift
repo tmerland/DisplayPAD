@@ -42,6 +42,8 @@ class StreamingEngine: NSObject, ObservableObject {
 
     @Published var isCapturing: Bool = false
     @Published var measuredFPS: Double = 0.0
+    @Published var measuredBitrate: Double = 0.0
+    private var bytesInSecond: Int = 0
 
     // MARK: Propriétés privées
 
@@ -56,6 +58,8 @@ class StreamingEngine: NSObject, ObservableObject {
 
     /// Compteur de frames pour le calcul du FPS réel
     private var frameCounter: Int = 0
+    private var capturedCount: Int = 0
+    private var encodedInCount: Int = 0
     private var fpsTimer: Timer?
     private var captureStartDate = Date()
 
@@ -86,7 +90,9 @@ class StreamingEngine: NSObject, ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.measuredFPS = Double(self.frameCounter)
+                self.measuredBitrate = Double(self.bytesInSecond * 8)
                 self.frameCounter = 0
+                self.bytesInSecond = 0
             }
         }
 
@@ -215,7 +221,7 @@ class StreamingEngine: NSObject, ObservableObject {
             config.height = settings.actualHeight
             config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(settings.actualFPS))
             config.pixelFormat = kCVPixelFormatType_32BGRA
-            config.showsCursor = false // Pas de curseur en v0.1
+            config.showsCursor = true // Pas de curseur en v0.1
 
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
 
@@ -294,6 +300,10 @@ class StreamingEngine: NSObject, ObservableObject {
         }
 
         frameCounter += 1
+        if frameCounter <= 3 || frameCounter % 300 == 0 {
+            print("[StreamingEngine] frame encodée #\(frameCounter) — \(annexBData.count) octets, clé=\(isKeyFrame)")
+        }
+        Task { @MainActor in self.bytesInSecond += annexBData.count }
         delegate?.didEncodeFrame(data: annexBData)
     }
 
@@ -345,19 +355,29 @@ extension StreamingEngine: SCStreamOutput {
 
         // Encode la frame si la session est disponible
         Task { @MainActor in
+            self.capturedCount += 1
             guard let session = compressionSession,
-                  let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+                  let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                if self.capturedCount <= 5 { print("[StreamingEngine] sample sans image (statut / idle) #\(self.capturedCount)") }
+                return
+            }
+            if self.encodedInCount < 3 || self.encodedInCount % 300 == 0 {
+                print("[StreamingEngine] frame capturée #\(self.encodedInCount) \(CVPixelBufferGetWidth(imageBuffer))×\(CVPixelBufferGetHeight(imageBuffer))")
+            }
+            self.encodedInCount += 1
+            
 
             let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             let duration = CMSampleBufferGetDuration(sampleBuffer)
 
-            VTCompressionSessionEncodeFrame(session,
+            let st = VTCompressionSessionEncodeFrame(session,
                                             imageBuffer: imageBuffer,
                                             presentationTimeStamp: presentationTime,
                                             duration: duration,
                                             frameProperties: nil,
                                             sourceFrameRefcon: nil,
                                             infoFlagsOut: nil)
+            if st != noErr { print("[StreamingEngine] Erreur encodage : \(st)") }
         }
     }
 }

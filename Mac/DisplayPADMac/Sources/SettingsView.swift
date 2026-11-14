@@ -5,6 +5,7 @@
 // Design style macOS Form avec sections groupées.
 
 import SwiftUI
+import ServiceManagement
 
 struct SettingsView: View {
 
@@ -112,14 +113,15 @@ struct SettingsView: View {
     /// Configure le lancement au démarrage via ServiceManagement
     /// (nécessite l'entitlement com.apple.security.application-groups sur macOS 13+)
     private func configurerLancementAuDemarrage(activer: Bool) {
-        // TODO (v0.2) : utiliser SMAppService.mainApp.register() / unregister()
-        // sur macOS 13+ pour gérer le lancement au démarrage sans helper.
-        // Pour l'instant, on enregistre simplement la préférence.
-        print("[Settings] Lancement au démarrage : \(activer ? "activé" : "désactivé") (non encore implémenté)")
+        do {
+            if activer {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            print("[Settings] Lancement au démarrage : erreur \(error.localizedDescription)")
+        }
     }
 }
 
-#Preview {
-    SettingsView()
-        .environmentObject(AppSettings())
-}

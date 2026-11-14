@@ -110,7 +110,17 @@ class ConnectionManager: ObservableObject {
     @Published var deviceName: String = ""
     @Published var currentFPS: Double = 0.0
     @Published var currentBitrate: Double = 0.0
-    @Published var batteryLevel: Int = -1  // -1 = inconnu
+    @Published var batteryLevel: Int = -1
+    @Published var currentLatency: Double = 0.0  // -1 = inconnu
+
+    // MARK: Callbacks de session (appelés sur le thread principal)
+
+    /// L'iPad a accepté le HELLO : on peut envoyer la configuration.
+    var onHelloAck: (() -> Void)?
+    /// L'iPad a accepté la CONFIG : on peut démarrer le flux vidéo.
+    var onConfigAck: (() -> Void)?
+    /// La connexion est perdue ou fermée.
+    var onDisconnected: (() -> Void)?
 
     // MARK: Propriétés privées
 
@@ -161,6 +171,7 @@ class ConnectionManager: ObservableObject {
             self?.currentFPS = 0
             self?.currentBitrate = 0
             self?.batteryLevel = -1
+            self?.onDisconnected?()
         }
     }
 
@@ -282,12 +293,15 @@ class ConnectionManager: ObservableObject {
         case .pong:
             if let date = lastPingDate {
                 let latency = Date().timeIntervalSince(date) * 1000
+            DispatchQueue.main.async { [weak self] in self?.currentLatency = latency }
                 print("[ConnectionManager] PONG reçu, latence : \(String(format: "%.1f", latency)) ms")
             }
         case .helloAck:
             print("[ConnectionManager] HELLO_ACK reçu — iPad prêt")
+            DispatchQueue.main.async { [weak self] in self?.onHelloAck?() }
         case .configAck:
             print("[ConnectionManager] CONFIG_ACK reçu — configuration acceptée")
+            DispatchQueue.main.async { [weak self] in self?.onConfigAck?() }
         default:
             print("[ConnectionManager] Paquet reçu : type=\(type)")
         }
@@ -326,6 +340,7 @@ class ConnectionManager: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.isConnected = false
             self?.deviceName = ""
+            self?.onDisconnected?()
         }
     }
 }

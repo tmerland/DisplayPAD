@@ -16,3 +16,10 @@ DerivedData/
 # Compiled object & archive files
 *.o
 *.a
+
+.build/
+.swiftpm/
+
+# Theos build artifacts
+iPad/.theos/
+iPad/packages/

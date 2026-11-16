@@ -40,12 +40,31 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
 // ─── Interface privée ────────────────────────────────────────────────────────
 
 @interface DisplayViewController ()
-@property (nonatomic, strong) UILabel *overlayLabel;
-@property (nonatomic, strong) NSData  *spsData;   // Derniers SPS reçus
-@property (nonatomic, strong) NSData  *ppsData;   // Derniers PPS reçus
-@property (nonatomic, strong) NSTimer *overlayTimer;
+@property (nonatomic, strong) UIView   *videoContainerView; // Conteneur zoomable/déplaçable
+@property (nonatomic, strong) UILabel  *overlayLabel;
+@property (nonatomic, strong) NSData   *spsData;   // Derniers SPS reçus
+@property (nonatomic, strong) NSData   *ppsData;   // Derniers PPS reçus
+@property (nonatomic, strong) NSTimer  *overlayTimer;
 @property (nonatomic, assign) CMVideoFormatDescriptionRef cachedFormatDesc;
-@property (nonatomic, assign) BOOL formatDescNeedsUpdate;
+@property (nonatomic, assign) BOOL     formatDescNeedsUpdate;
+
+// Zoom & Pan
+@property (nonatomic, assign) CGFloat  currentZoomScale;
+@property (nonatomic, assign) CGPoint  currentPanOffset;
+@property (nonatomic, strong) UIPinchGestureRecognizer *pinchRecognizer;
+@property (nonatomic, strong) UIPanGestureRecognizer   *panRecognizer;
+@property (nonatomic, strong) UITapGestureRecognizer   *doubleTapRecognizer;
+
+// Menu Réglages (geste 3 doigts)
+@property (nonatomic, strong) UITapGestureRecognizer   *threeFingerTapRecognizer;
+@property (nonatomic, strong) SettingsOverlayView      *settingsOverlay;
+
+// Télémétrie & État
+@property (nonatomic, copy)   NSString *connectedClientIP;
+@property (nonatomic, assign) CGSize   streamResolution;
+@property (nonatomic, assign) NSUInteger frameCountInWindow;
+@property (nonatomic, strong) NSDate   *lastFPSCalculationDate;
+@property (nonatomic, assign) NSUInteger currentCalculatedFPS;
 @end
 
 // ─── Implémentation ──────────────────────────────────────────────────────────
@@ -57,16 +76,30 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
 - (void)viewDidLoad {
     [super viewDidLoad];
 
+    // Valeurs initiales zoom
+    _currentZoomScale = 1.0;
+    _currentPanOffset = CGPointZero;
+    _lastFPSCalculationDate = [NSDate date];
+
     // Fond noir
     self.view.backgroundColor = [UIColor blackColor];
+
+    // Conteneur vidéo zoomable
+    self.videoContainerView = [[UIView alloc] initWithFrame:self.view.bounds];
+    self.videoContainerView.backgroundColor = [UIColor blackColor];
+    self.videoContainerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:self.videoContainerView];
 
     // Configurer AVSampleBufferDisplayLayer — décodage H.264 matériel natif (A7)
     self.displayLayer = [[AVSampleBufferDisplayLayer alloc] init];
     self.displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
     self.displayLayer.opaque       = YES;
     self.displayLayer.backgroundColor = [UIColor blackColor].CGColor;
-    self.displayLayer.frame = self.view.bounds;
-    [self.view.layer addSublayer:self.displayLayer];
+    self.displayLayer.frame = self.videoContainerView.bounds;
+    [self.videoContainerView.layer addSublayer:self.displayLayer];
+
+    // Configurer les gestes interactifs
+    [self setupGestures];
 
     // Overlay "En attente de connexion..." affiché dès le démarrage
     [self setupOverlayLabel];
@@ -78,13 +111,190 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
     self.receiver.delegate = self;
     [self.receiver startListening];
 
-    NSLog(@"[DisplayVC] Vue chargée — récepteur TCP démarré sur le port 7000");
+    NSLog(@"[DisplayVC] Vue chargée — récepteur TCP démarré sur le port 7000 (gestes zoom & 3 doigts actifs)");
 }
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    // Mettre à jour le frame du layer vidéo lors des rotations / redimensionnements
-    self.displayLayer.frame = self.view.bounds;
+    // Ajuster le conteneur et le layer vidéo uniquement si on n'est pas zoomé
+    if (self.currentZoomScale <= 1.01) {
+        self.videoContainerView.transform = CGAffineTransformIdentity;
+        self.videoContainerView.frame = self.view.bounds;
+        self.displayLayer.frame = self.videoContainerView.bounds;
+    }
+}
+
+// ── Configuration des Gestes (Zoom, Pan, 3 Doigts) ───────────────────────────
+
+- (void)setupGestures {
+    // 1. Geste 3 doigts n'importe où sur l'écran : ouvre le menu Réglages
+    self.threeFingerTapRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleThreeFingerTap:)];
+    self.threeFingerTapRecognizer.numberOfTouchesRequired = 3;
+    self.threeFingerTapRecognizer.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:self.threeFingerTapRecognizer];
+
+    // 2. Pinch à 2 doigts : zoomer / dézoomer
+    self.pinchRecognizer = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)];
+    self.pinchRecognizer.delegate = self;
+    self.pinchRecognizer.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:self.pinchRecognizer];
+
+    // 3. Pan à 2 doigts : déplacer l'affichage lorsque l'on est zoomé
+    self.panRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    self.panRecognizer.minimumNumberOfTouches = 2;
+    self.panRecognizer.maximumNumberOfTouches = 2;
+    self.panRecognizer.delegate = self;
+    self.panRecognizer.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:self.panRecognizer];
+
+    // 4. Double-tap à 2 doigts : réinitialiser instantanément le zoom à 1:1
+    self.doubleTapRecognizer = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+    self.doubleTapRecognizer.numberOfTapsRequired = 2;
+    self.doubleTapRecognizer.numberOfTouchesRequired = 2;
+    self.doubleTapRecognizer.cancelsTouchesInView = NO;
+    [self.view addGestureRecognizer:self.doubleTapRecognizer];
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    // Autoriser pinch et pan à 2 doigts simultanément
+    if ((gestureRecognizer == self.pinchRecognizer && otherGestureRecognizer == self.panRecognizer) ||
+        (gestureRecognizer == self.panRecognizer && otherGestureRecognizer == self.pinchRecognizer)) {
+        return YES;
+    }
+    return NO;
+}
+
+// ── Gestionnaires d'actions gestuelles ────────────────────────────────────────
+
+- (void)handleThreeFingerTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateEnded) {
+        [self toggleSettingsOverlay];
+    }
+}
+
+- (void)handlePinch:(UIPinchGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan || gesture.state == UIGestureRecognizerStateChanged) {
+        CGFloat newScale = self.currentZoomScale * gesture.scale;
+        // Limiter le facteur d'échelle entre 1.0x et 5.0x
+        newScale = MAX(1.0, MIN(newScale, 5.0));
+
+        [self applyZoomScale:newScale panOffset:self.currentPanOffset];
+        gesture.scale = 1.0;
+        self.currentZoomScale = newScale;
+
+        if (self.settingsOverlay.superview) {
+            [self.settingsOverlay updateZoomScale:self.currentZoomScale];
+        }
+    } else if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        if (self.currentZoomScale <= 1.01) {
+            [self resetZoomAnimated:YES];
+        }
+    }
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)gesture {
+    if (self.currentZoomScale <= 1.01) return; // Pas de pan à l'échelle 1:1
+
+    CGPoint translation = [gesture translationInView:self.view];
+
+    if (gesture.state == UIGestureRecognizerStateChanged) {
+        CGPoint newOffset = CGPointMake(self.currentPanOffset.x + translation.x,
+                                        self.currentPanOffset.y + translation.y);
+
+        // Clamping des bords pour éviter de faire sortir l'image de l'écran
+        CGFloat maxOffsetX = (self.view.bounds.size.width * (self.currentZoomScale - 1.0)) / 2.0;
+        CGFloat maxOffsetY = (self.view.bounds.size.height * (self.currentZoomScale - 1.0)) / 2.0;
+
+        newOffset.x = MAX(-maxOffsetX, MIN(newOffset.x, maxOffsetX));
+        newOffset.y = MAX(-maxOffsetY, MIN(newOffset.y, maxOffsetY));
+
+        [self applyZoomScale:self.currentZoomScale panOffset:newOffset];
+        [gesture setTranslation:CGPointZero inView:self.view];
+        self.currentPanOffset = newOffset;
+    }
+}
+
+- (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateEnded) {
+        [self resetZoomAnimated:YES];
+    }
+}
+
+- (void)applyZoomScale:(CGFloat)scale panOffset:(CGPoint)offset {
+    if (scale <= 1.001) {
+        self.videoContainerView.transform = CGAffineTransformIdentity;
+        return;
+    }
+    // Translation appliquée par rapport au centre redimensionné
+    CGAffineTransform transform = CGAffineTransformMakeTranslation(offset.x, offset.y);
+    transform = CGAffineTransformScale(transform, scale, scale);
+    self.videoContainerView.transform = transform;
+}
+
+- (void)resetZoomAnimated:(BOOL)animated {
+    void (^resetBlock)(void) = ^{
+        self.videoContainerView.transform = CGAffineTransformIdentity;
+    };
+
+    self.currentZoomScale = 1.0;
+    self.currentPanOffset = CGPointZero;
+
+    if (animated) {
+        [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:resetBlock completion:nil];
+    } else {
+        resetBlock();
+    }
+
+    if (self.settingsOverlay.superview) {
+        [self.settingsOverlay updateZoomScale:1.0];
+    }
+}
+
+// ── Gestion du Menu Réglages (Overlay 3 Doigts) ──────────────────────────────
+
+- (void)toggleSettingsOverlay {
+    if (self.settingsOverlay && self.settingsOverlay.superview) {
+        [self.settingsOverlay dismiss];
+    } else {
+        if (!self.settingsOverlay) {
+            self.settingsOverlay = [[SettingsOverlayView alloc] initWithFrame:self.view.bounds];
+            self.settingsOverlay.delegate = self;
+        }
+        [self.settingsOverlay setVideoGravity:self.displayLayer.videoGravity];
+        [self.settingsOverlay updateZoomScale:self.currentZoomScale];
+        [self.settingsOverlay updateFPS:self.currentCalculatedFPS];
+        if (!CGSizeEqualToSize(self.streamResolution, CGSizeZero)) {
+            [self.settingsOverlay updateResolution:self.streamResolution];
+        }
+        BOOL isConnected = (self.receiver != nil && self.connectedClientIP != nil);
+        [self.settingsOverlay updateConnectionState:isConnected ? @"Connecté" : @"En attente…"
+                                        isConnected:isConnected
+                                           clientIP:self.connectedClientIP];
+        [self.settingsOverlay showInView:self.view];
+    }
+}
+
+// ── SettingsOverlayDelegate ──────────────────────────────────────────────────
+
+- (void)settingsOverlayDidRequestResetZoom:(SettingsOverlayView *)overlay {
+    [self resetZoomAnimated:YES];
+}
+
+- (void)settingsOverlay:(SettingsOverlayView *)overlay didChangeVideoGravity:(AVLayerVideoGravity)gravity {
+    self.displayLayer.videoGravity = gravity;
+}
+
+- (void)settingsOverlayDidRequestReconnect:(SettingsOverlayView *)overlay {
+    NSLog(@"[DisplayVC] Demande de reconnexion depuis le menu Réglages");
+    [self.displayLayer flushAndRemoveImage];
+    [self.receiver stopListening];
+    [self.receiver startListening];
+    [self showOverlayWithText:@"Réinitialisation du récepteur…" persistent:NO];
+    [overlay dismiss];
+}
+
+- (void)settingsOverlayDidDismiss:(SettingsOverlayView *)overlay {
+    NSLog(@"[DisplayVC] Menu Réglages fermé");
 }
 
 // ── Orientation et UI ────────────────────────────────────────────────────────
@@ -286,11 +496,22 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
 
 - (void)tcpReceiverDidConnect:(TCPReceiver *)receiver {
     NSLog(@"[DisplayVC] Mac connecté — démarrage de l'affichage H.264");
+    self.connectedClientIP = @"Mac";
+    if (self.settingsOverlay.superview) {
+        [self.settingsOverlay updateConnectionState:@"Connecté" isConnected:YES clientIP:self.connectedClientIP];
+    }
     [self showOverlayWithText:@"Connecté" persistent:NO];
 }
 
 - (void)tcpReceiverDidDisconnect:(TCPReceiver *)receiver {
     NSLog(@"[DisplayVC] Connexion perdue — en attente…");
+    self.connectedClientIP = nil;
+    self.currentCalculatedFPS = 0;
+    self.frameCountInWindow = 0;
+    if (self.settingsOverlay.superview) {
+        [self.settingsOverlay updateConnectionState:@"En attente…" isConnected:NO clientIP:nil];
+        [self.settingsOverlay updateFPS:0];
+    }
     [self showOverlayWithText:@"En attente de connexion…" persistent:YES];
 
     // Vider le layer vidéo
@@ -301,13 +522,26 @@ static NSUInteger startCodeLength(const uint8_t *data, NSUInteger length, NSUInt
     NSLog(@"[DisplayVC] CONFIG reçu : %dx%d@%ufps orientation=%u",
           config.width, config.height, config.fps, config.orientation);
 
-    // Mettre à jour l'orientation de l'interface si nécessaire
-    // (iOS 12 : forcer la rotation via le AppDelegate si besoin)
-    // Pour l'instant on accepte toutes les orientations
+    self.streamResolution = CGSizeMake(config.width, config.height);
+    if (self.settingsOverlay.superview) {
+        [self.settingsOverlay updateResolution:self.streamResolution];
+    }
 }
 
 - (void)tcpReceiver:(TCPReceiver *)receiver didReceiveFrame:(NSData *)nalData {
     if (nalData.length == 0) return;
+
+    // Calcul FPS
+    self.frameCountInWindow++;
+    NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:self.lastFPSCalculationDate];
+    if (elapsed >= 1.0) {
+        self.currentCalculatedFPS = (NSUInteger)round(self.frameCountInWindow / elapsed);
+        self.frameCountInWindow = 0;
+        self.lastFPSCalculationDate = [NSDate date];
+        if (self.settingsOverlay.superview) {
+            [self.settingsOverlay updateFPS:self.currentCalculatedFPS];
+        }
+    }
 
     // ── Étape 1 : Parser les NAL units pour détecter SPS/PPS ───────────────
     NSArray<NSData *> *nalUnits = [self parseNALUnitsFromData:nalData];

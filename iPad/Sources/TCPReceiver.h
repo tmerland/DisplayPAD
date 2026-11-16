@@ -43,6 +43,18 @@ typedef struct __attribute__((packed)) {
     char     device_name[64]; // Nom du device (null-terminé)
 } DPHelloPayload;
 
+// Protocole UDP vidéo basse latence (port 7001)
+#define DP_UDP_PORT       7001
+#define DP_UDP_MAGIC      0x44505544u
+#define DP_UDP_MAX_CHUNK  1350u
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t frame_id;
+    uint16_t chunk_index;
+    uint16_t chunk_count;
+} DPUDPChunkHeader;
+
 // ─── Protocole délégué ──────────────────────────────────────────────────────
 
 @class TCPReceiver;

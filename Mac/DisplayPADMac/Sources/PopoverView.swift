@@ -75,7 +75,7 @@ struct PopoverView: View {
                 Text("DisplayPAD")
                     .font(.headline)
                     .foregroundStyle(.primary)
-                Text("v0.1.0")
+                Text("v0.2.0")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -93,7 +93,7 @@ struct PopoverView: View {
     // MARK: - Section connexion
 
     private var sectionConnexion: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             // Nom du device
             HStack {
                 Image(systemName: connectionManager.isConnected ? "ipad" : (connectionManager.isConnecting ? "antenna.radiowaves.left.and.right" : "ipad.slash"))
@@ -106,12 +106,53 @@ struct PopoverView: View {
                 Spacer()
             }
 
+            // Mode de liaison : USB vs AWDL (Wi-Fi Direct) vs Wi-Fi IP
+            Picker("Mode", selection: $settings.connectionMode) {
+                Text("USB").tag("usb")
+                Text("AWDL Direct").tag("awdl")
+                Text("Wi-Fi IP").tag("wifi")
+            }
+            .pickerStyle(.segmented)
+            .disabled(connectionManager.isConnected || connectionManager.isConnecting)
+
+            if settings.connectionMode == "awdl" {
+                Text("⚡ Liaison directe Apple (sans passer par le routeur, conserve Internet)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            // Saisie IP en mode sans-fil manuel
+            if settings.connectionMode == "wifi" {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Image(systemName: "wifi")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                        TextField("IP iPad (ex: 192.168.1.45)", text: $settings.customHost)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.callout)
+                            .disabled(connectionManager.isConnected || connectionManager.isConnecting)
+                    }
+                    Text("Tapez 3 doigts sur l'iPad pour lire son IP")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
             // Bouton Connecter / Déconnecter
             Button {
                 if connectionManager.isConnected || connectionManager.isConnecting {
                     connectionManager.disconnect()
                 } else {
-                    connectionManager.connect(port: settings.tcpPort)
+                    if settings.connectionMode == "awdl" {
+                        connectionManager.connectPeerToPeer()
+                    } else if settings.connectionMode == "wifi" {
+                        let host = settings.customHost.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let targetHost = host.isEmpty ? "192.168.1.1" : host
+                        connectionManager.connect(host: targetHost, port: 7000)
+                    } else {
+                        connectionManager.connect(host: "127.0.0.1", port: settings.tcpPort)
+                    }
                 }
             } label: {
                 Text(connectionManager.isConnected ? "Déconnecter" : (connectionManager.isConnecting ? "Arrêter la recherche" : "Connecter"))

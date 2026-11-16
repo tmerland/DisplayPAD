@@ -137,11 +137,26 @@ class ConnectionManager: ObservableObject {
     /// File d'attente réseau dédiée
     private let networkQueue = DispatchQueue(label: "com.displaypad.network", qos: .userInitiated)
 
-    /// Connexion NWConnection (framework Network)
+    /// Connexion NWConnection TCP (contrôle + mode USB)
     private var connection: NWConnection?
+
+    /// Connexion NWConnection UDP (flux vidéo Wi-Fi ultra-basse latence sur port 7001)
+    private var udpConnection: NWConnection?
+
+    /// Navigateur Bonjour / AWDL pour découverte Peer-to-Peer
+    private var browser: NWBrowser?
+
+    /// Indique si la session actuelle est en mode Peer-to-Peer (AWDL)
+    private var isPeerToPeerMode: Bool = false
+
+    /// Compteur séquentiel d'image UDP
+    private var udpFrameId: UInt32 = 0
 
     /// Timer de ping (toutes les 5 secondes)
     private var pingTimer: Timer?
+
+    /// Hôte TCP configuré (127.0.0.1 pour USB, IP directe pour Wi-Fi)
+    private var currentHost: String = "127.0.0.1"
 
     /// Port TCP configuré
     private var currentPort: Int = 7000
@@ -149,39 +164,102 @@ class ConnectionManager: ObservableObject {
     /// Date du dernier ping envoyé (pour mesurer la latence)
     private var lastPingDate: Date?
 
-    // MARK: - Interface publique
+    /// Contrôle de congestion (backpressure) pour éviter le bufferbloat en Wi-Fi
+    private let inflightLock = NSLock()
+    private var _inFlightFrames: Int = 0
 
-    /// Établit la connexion TCP vers 127.0.0.1:port
-    func connect(port: Int = 7100) {
-        isUserInitiatedDisconnect = false
-        stopReconnectTimer()
-        startConnectionAttempt(port: port)
+    /// Indique si le réseau peut absorber une nouvelle frame sans accumuler de latence
+    nonisolated var canSendFrame: Bool {
+        inflightLock.lock()
+        defer { inflightLock.unlock() }
+        return _inFlightFrames < 2
     }
 
-    private func startConnectionAttempt(port: Int) {
+    // MARK: - Interface publique
+
+    /// Découvre et connecte l'iPad en Wi-Fi Direct (AWDL / Bonjour) tout en conservant internet
+    func connectPeerToPeer() {
+        isUserInitiatedDisconnect = false
+        isPeerToPeerMode = true
+        stopReconnectTimer()
+        startPeerToPeerDiscovery()
+    }
+
+    private func startPeerToPeerDiscovery() {
         guard !isConnected else { return }
-        currentPort = port
+        currentHost = "awdl"
 
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
+        udpConnection?.cancel()
+        udpConnection = nil
+        browser?.cancel()
+        browser = nil
+        udpFrameId = 0
 
         DispatchQueue.main.async { [weak self] in
             self?.isConnecting = true
         }
 
-        let host = NWEndpoint.Host("127.0.0.1")
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
-            print("[ConnectionManager] Port invalide : \(port)")
-            return
+        let params = NWParameters()
+        params.includePeerToPeer = true
+        let nwBrowser = NWBrowser(for: .bonjour(type: "_displaypad._tcp", domain: nil), using: params)
+
+        var fallbackWorkItem: DispatchWorkItem?
+
+        nwBrowser.browseResultsChangedHandler = { [weak self] results, _ in
+            guard let self = self, !self.isConnected, self.connection == nil else { return }
+
+            // 1. Si l'interface directe awdl0 est prête, on l'utilise immédiatement !
+            if let awdlResult = results.first(where: { $0.interfaces.contains(where: { $0.name == "awdl0" }) }) {
+                fallbackWorkItem?.cancel()
+                fallbackWorkItem = nil
+                print("[AWDL] Interface directe awdl0 trouvée : \(awdlResult.endpoint)")
+                self.browser?.cancel()
+                self.browser = nil
+                self.connectToEndpoint(awdlResult.endpoint, requiredInterface: awdlResult.interfaces.first(where: { $0.name == "awdl0" }))
+                return
+            }
+
+            // 2. Sinon, on attend 1.5s que awdl0 s'initialise avant de se rabattre sur en0
+            if fallbackWorkItem == nil, let anyResult = results.first {
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self = self, !self.isConnected, self.connection == nil else { return }
+                    let ifNames = anyResult.interfaces.map { $0.name }.joined(separator: ",")
+                    print("[AWDL] awdl0 indisponible après 1.5s, repli sur : \(anyResult.endpoint) (\(ifNames))")
+                    self.browser?.cancel()
+                    self.browser = nil
+                    self.connectToEndpoint(anyResult.endpoint, requiredInterface: nil)
+                }
+                fallbackWorkItem = item
+                self.networkQueue.asyncAfter(deadline: .now() + 1.5, execute: item)
+            }
         }
 
-        let tcpOptions = NWProtocolTCP.Options()
-        tcpOptions.connectionTimeout = 2
-        tcpOptions.enableKeepalive = true
-        let params = NWParameters(tls: nil, tcp: tcpOptions)
+        nwBrowser.stateUpdateHandler = { state in
+            print("[AWDL] État du navigateur Bonjour : \(state)")
+        }
 
-        let conn = NWConnection(host: host, port: nwPort, using: params)
+        browser = nwBrowser
+        nwBrowser.start(queue: networkQueue)
+        print("[AWDL] Recherche Peer-to-Peer (_displaypad._tcp) démarrée…")
+    }
+
+    private func connectToEndpoint(_ endpoint: NWEndpoint, requiredInterface: NWInterface?) {
+        inflightLock.lock()
+        _inFlightFrames = 0
+        inflightLock.unlock()
+
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.connectionTimeout = 4
+        tcpOptions.enableKeepalive = true
+        tcpOptions.noDelay = true
+
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
+        params.includePeerToPeer = true
+
+        let conn = NWConnection(to: endpoint, using: params)
         conn.stateUpdateHandler = { [weak self] state in
             self?.handleConnectionState(state)
         }
@@ -189,15 +267,78 @@ class ConnectionManager: ObservableObject {
         conn.start(queue: networkQueue)
     }
 
+    /// Établit la connexion TCP (+ UDP en Wi-Fi) vers host:port
+    func connect(host: String = "127.0.0.1", port: Int = 7100) {
+        isUserInitiatedDisconnect = false
+        isPeerToPeerMode = false
+        browser?.cancel()
+        browser = nil
+        stopReconnectTimer()
+        startConnectionAttempt(host: host, port: port)
+    }
+
+    private func startConnectionAttempt(host: String, port: Int) {
+        guard !isConnected else { return }
+        currentHost = host
+        currentPort = port
+
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+
+        udpConnection?.cancel()
+        udpConnection = nil
+        udpFrameId = 0
+
+        DispatchQueue.main.async { [weak self] in
+            self?.isConnecting = true
+        }
+
+        let nwHost = NWEndpoint.Host(host)
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
+            print("[ConnectionManager] Port invalide : \(port)")
+            return
+        }
+
+        inflightLock.lock()
+        _inFlightFrames = 0
+        inflightLock.unlock()
+
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.connectionTimeout = 3
+        tcpOptions.enableKeepalive = true
+        tcpOptions.noDelay = true // Désactive Nagle pour une latence minimale en Wi-Fi
+        let params = NWParameters(tls: nil, tcp: tcpOptions)
+
+        let conn = NWConnection(host: nwHost, port: nwPort, using: params)
+        conn.stateUpdateHandler = { [weak self] state in
+            self?.handleConnectionState(state)
+        }
+        connection = conn
+        conn.start(queue: networkQueue)
+
+        // En mode Wi-Fi (hôte non-localhost), ouvrir le canal vidéo UDP port 7001
+        if host != "127.0.0.1", let udpPort = NWEndpoint.Port(rawValue: 7001) {
+            let udp = NWConnection(host: nwHost, port: udpPort, using: .udp)
+            udp.start(queue: networkQueue)
+            udpConnection = udp
+            print("[ConnectionManager] Canal vidéo UDP ouvert vers \(host):7001")
+        }
+    }
+
     /// Ferme la connexion volontairement
     func disconnect() {
         isUserInitiatedDisconnect = true
         stopReconnectTimer()
+        browser?.cancel()
+        browser = nil
         sendPacket(type: .disconnect, payload: Data())
         stopPingTimer()
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
+        udpConnection?.cancel()
+        udpConnection = nil
         DispatchQueue.main.async { [weak self] in
             self?.isConnected = false
             self?.isConnecting = false
@@ -239,9 +380,27 @@ class ConnectionManager: ObservableObject {
         sendPacket(type: .ping, payload: Data())
     }
 
-    /// Envoie un frame H.264 encodé
+    /// Envoie un frame H.264 encodé via TCP (noDelay + backpressure strict pour zéro perte H.264 et zéro retard)
     func sendFrame(_ frameData: Data) {
-        sendPacket(type: .frame, payload: frameData)
+        // TCP avec backpressure (_inFlightFrames < 2) évite à la fois la perte de P-frames (UDP)
+        // et l'accumulation de buffer (bufferbloat).
+        inflightLock.lock()
+        _inFlightFrames += 1
+        inflightLock.unlock()
+
+        let header = DPHeader(type: DPPacketType.frame.rawValue, length: UInt32(frameData.count))
+        var packet = header.toData()
+        packet.append(frameData)
+        connection?.send(content: packet, completion: .contentProcessed { [weak self] error in
+            if let self = self {
+                self.inflightLock.lock()
+                self._inFlightFrames = max(0, self._inFlightFrames - 1)
+                self.inflightLock.unlock()
+            }
+            if let error = error {
+                print("[ConnectionManager] Erreur envoi frame : \(error)")
+            }
+        })
     }
 
     // MARK: - Gestion de la connexion
@@ -250,6 +409,16 @@ class ConnectionManager: ObservableObject {
         switch state {
         case .ready:
             print("[ConnectionManager] Connexion établie sur le port \(currentPort)")
+            if isPeerToPeerMode, let endpoint = connection?.currentPath?.remoteEndpoint,
+               case let .hostPort(remoteHost, _) = endpoint,
+               let udpPort = NWEndpoint.Port(rawValue: 7001) {
+                let udpParams = NWParameters.udp
+                udpParams.includePeerToPeer = true
+                let udp = NWConnection(host: remoteHost, port: udpPort, using: udpParams)
+                udp.start(queue: networkQueue)
+                udpConnection = udp
+                print("[AWDL] Canal vidéo UDP ouvert vers \(remoteHost):7001")
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.stopReconnectTimer()
@@ -381,6 +550,8 @@ class ConnectionManager: ObservableObject {
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
+        udpConnection?.cancel()
+        udpConnection = nil
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -407,8 +578,10 @@ class ConnectionManager: ObservableObject {
             guard let self = self else { return }
             if self.isConnected || self.isUserInitiatedDisconnect {
                 self.stopReconnectTimer()
+            } else if self.isPeerToPeerMode {
+                self.startPeerToPeerDiscovery()
             } else {
-                self.startConnectionAttempt(port: self.currentPort)
+                self.startConnectionAttempt(host: self.currentHost, port: self.currentPort)
             }
         }
     }

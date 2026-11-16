@@ -3,13 +3,16 @@
 #import "TCPReceiver.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
+#import <netinet/tcp.h>
 #import <arpa/inet.h>
 #import <unistd.h>
 #import <errno.h>
 
-@interface TCPReceiver ()
-@property (nonatomic, assign) int serverSocket;   // Socket d'écoute serveur
-@property (nonatomic, assign) int clientSocket;   // Socket client connecté
+@interface TCPReceiver () <NSNetServiceDelegate>
+@property (nonatomic, assign) int serverSocket;   // Socket d'écoute serveur TCP
+@property (nonatomic, assign) int clientSocket;   // Socket client TCP connecté
+@property (nonatomic, assign) int udpSocket;      // Socket d'écoute UDP vidéo (port 7001)
+@property (nonatomic, strong) NSNetService *netService; // Annonce Bonjour / AWDL Peer-to-Peer
 @property (nonatomic, assign) BOOL isListening;
 @property (nonatomic, assign) BOOL shouldStop;
 @end
@@ -22,6 +25,7 @@
         _port          = 7000;
         _serverSocket  = -1;
         _clientSocket  = -1;
+        _udpSocket     = -1;
         _isListening   = NO;
         _shouldStop    = NO;
     }
@@ -216,7 +220,7 @@ cleanup:
 - (void)acceptConnectionLoop {
     NSLog(@"[TCPReceiver] En attente de connexion sur le port %d…", self.port);
     while (!self.shouldStop) {
-        struct sockaddr_in clientAddr;
+        struct sockaddr_storage clientAddr;
         socklen_t addrLen = sizeof(clientAddr);
         int clientSock = accept(self.serverSocket, (struct sockaddr *)&clientAddr, &addrLen);
 
@@ -227,9 +231,18 @@ cleanup:
             break;
         }
 
-        char clientIP[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &clientAddr.sin_addr, clientIP, sizeof(clientIP));
-        NSLog(@"[TCPReceiver] Connexion acceptée depuis %s:%d", clientIP, ntohs(clientAddr.sin_port));
+        char clientIP[INET6_ADDRSTRLEN] = {0};
+        if (clientAddr.ss_family == AF_INET) {
+            struct sockaddr_in *s = (struct sockaddr_in *)&clientAddr;
+            inet_ntop(AF_INET, &s->sin_addr, clientIP, sizeof(clientIP));
+        } else if (clientAddr.ss_family == AF_INET6) {
+            struct sockaddr_in6 *s = (struct sockaddr_in6 *)&clientAddr;
+            inet_ntop(AF_INET6, &s->sin6_addr, clientIP, sizeof(clientIP));
+        }
+        NSLog(@"[TCPReceiver] Connexion acceptée depuis %s", clientIP);
+
+        int nodelay = 1;
+        setsockopt(clientSock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         self.clientSocket = clientSock;
 
@@ -249,6 +262,76 @@ cleanup:
     }
 }
 
+// ─── Boucle de réception UDP vidéo (port 7001) ────────────────────────────────
+- (void)udpReceiveLoop {
+    NSLog(@"[UDPReceiver] Boucle de réception UDP démarrée sur le port %d", DP_UDP_PORT);
+
+    uint8_t buf[2048];
+    uint32_t currentFrameId = 0;
+    uint16_t expectedChunks = 0;
+    BOOL hasActiveFrame = NO;
+    NSMutableDictionary<NSNumber *, NSData *> *chunks = [NSMutableDictionary dictionary];
+
+    while (!self.shouldStop && self.udpSocket >= 0) {
+        ssize_t n = recvfrom(self.udpSocket, buf, sizeof(buf), 0, NULL, NULL);
+        if (n < 0) {
+            if (self.shouldStop) break;
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            NSLog(@"[UDPReceiver] Erreur recvfrom : %s", strerror(errno));
+            break;
+        }
+        if ((size_t)n < sizeof(DPUDPChunkHeader)) continue;
+
+        DPUDPChunkHeader hdr;
+        memcpy(&hdr, buf, sizeof(DPUDPChunkHeader));
+        if (ntohl(hdr.magic) != DP_UDP_MAGIC) continue;
+
+        uint32_t frameId    = ntohl(hdr.frame_id);
+        uint16_t chunkIndex = ntohs(hdr.chunk_index);
+        uint16_t chunkCount = ntohs(hdr.chunk_count);
+
+        if (chunkCount == 0 || chunkIndex >= chunkCount) continue;
+
+        if (!hasActiveFrame || frameId != currentFrameId) {
+            // Ignorer les paquets obsolètes d'une image déjà dépassée
+            if (hasActiveFrame && frameId < currentFrameId && (currentFrameId - frameId) < 1000) {
+                continue;
+            }
+            [chunks removeAllObjects];
+            currentFrameId = frameId;
+            expectedChunks = chunkCount;
+            hasActiveFrame = YES;
+        }
+
+        size_t payloadLen = (size_t)n - sizeof(DPUDPChunkHeader);
+        NSData *chunkData = [NSData dataWithBytes:(buf + sizeof(DPUDPChunkHeader)) length:payloadLen];
+        chunks[@(chunkIndex)] = chunkData;
+
+        if (chunks.count == expectedChunks) {
+            NSMutableData *fullFrame = [NSMutableData dataWithCapacity:expectedChunks * DP_UDP_MAX_CHUNK];
+            BOOL complete = YES;
+            for (uint16_t i = 0; i < expectedChunks; i++) {
+                NSData *part = chunks[@(i)];
+                if (!part) { complete = NO; break; }
+                [fullFrame appendData:part];
+            }
+            [chunks removeAllObjects];
+            hasActiveFrame = NO;
+
+            if (complete && fullFrame.length > 0) {
+                NSData *immutableFrame = [fullFrame copy];
+                id<TCPReceiverDelegate> delegate = self.delegate;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if ([delegate respondsToSelector:@selector(tcpReceiver:didReceiveFrame:)]) {
+                        [delegate tcpReceiver:self didReceiveFrame:immutableFrame];
+                    }
+                });
+            }
+        }
+    }
+    NSLog(@"[UDPReceiver] Boucle de réception UDP terminée");
+}
+
 // ─── API publique ─────────────────────────────────────────────────────────────
 
 - (void)startListening {
@@ -259,23 +342,23 @@ cleanup:
 
     self.shouldStop = NO;
 
-    // Créer le socket serveur
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    // 1. Créer le socket serveur TCP dual-stack IPv4+IPv6 (supporte USB, Wi-Fi IPv4, et AWDL IPv6)
+    int sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     if (sock < 0) {
         NSLog(@"[TCPReceiver] Impossible de créer le socket : %s", strerror(errno));
         return;
     }
 
-    // Option SO_REUSEADDR pour éviter "Address already in use" après redémarrage
     int yes = 1;
+    int no  = 0;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)); // Accepte IPv4 et IPv6
 
-    // Bind sur toutes les interfaces, port configuré
-    struct sockaddr_in addr;
+    struct sockaddr_in6 addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port        = htons(self.port);
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr   = in6addr_any;
+    addr.sin6_port   = htons(self.port);
 
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         NSLog(@"[TCPReceiver] Erreur bind sur le port %d : %s", self.port, strerror(errno));
@@ -290,10 +373,49 @@ cleanup:
     }
 
     self.serverSocket = sock;
-    self.isListening  = YES;
-    NSLog(@"[TCPReceiver] Socket serveur prêt sur le port %d (fd=%d)", self.port, sock);
 
-    // Lancer la boucle d'attente sur un thread en arrière-plan
+    // 2. Créer le socket UDP vidéo dual-stack IPv4+IPv6 (port 7001, ultra-basse latence Wi-Fi/AWDL)
+    int udpSock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    if (udpSock >= 0) {
+        setsockopt(udpSock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        setsockopt(udpSock, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no));
+        int rcvBuf = 512 * 1024;
+        setsockopt(udpSock, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(rcvBuf));
+
+        struct sockaddr_in6 udpAddr;
+        memset(&udpAddr, 0, sizeof(udpAddr));
+        udpAddr.sin6_family = AF_INET6;
+        udpAddr.sin6_addr   = in6addr_any;
+        udpAddr.sin6_port   = htons(DP_UDP_PORT);
+
+        if (bind(udpSock, (struct sockaddr *)&udpAddr, sizeof(udpAddr)) == 0) {
+            self.udpSocket = udpSock;
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+                [self udpReceiveLoop];
+            });
+        } else {
+            NSLog(@"[UDPReceiver] Erreur bind UDP port %d : %s", DP_UDP_PORT, strerror(errno));
+            close(udpSock);
+        }
+    }
+
+    self.isListening  = YES;
+    NSLog(@"[TCPReceiver] Serveur dual-stack prêt : TCP:%d + UDP:%d", self.port, DP_UDP_PORT);
+
+    // 3. Publier le service Bonjour avec support Peer-to-Peer (AWDL Wi-Fi Direct)
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.netService stop];
+        self.netService = [[NSNetService alloc] initWithDomain:@"local."
+                                                          type:@"_displaypad._tcp."
+                                                          name:@""
+                                                          port:self.port];
+        self.netService.includesPeerToPeer = YES;
+        self.netService.delegate = self;
+        [self.netService publish];
+        NSLog(@"[Bonjour] Service _displaypad._tcp publié (AWDL Peer-to-Peer activé)");
+    });
+
+    // Lancer la boucle d'attente TCP sur un thread en arrière-plan
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         [self acceptConnectionLoop];
     });
@@ -304,6 +426,11 @@ cleanup:
 
     self.shouldStop  = YES;
     self.isListening = NO;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.netService stop];
+        self.netService = nil;
+    });
 
     // Fermer le socket serveur pour débloquer accept()
     if (self.serverSocket >= 0) {
@@ -317,7 +444,23 @@ cleanup:
         self.clientSocket = -1;
     }
 
+    // Fermer le socket UDP pour débloquer recvfrom()
+    if (self.udpSocket >= 0) {
+        close(self.udpSocket);
+        self.udpSocket = -1;
+    }
+
     NSLog(@"[TCPReceiver] Arrêt de l'écoute");
+}
+
+#pragma mark - NSNetServiceDelegate
+
+- (void)netServiceDidPublish:(NSNetService *)sender {
+    NSLog(@"[Bonjour] Service publié avec succès : %@", sender.name);
+}
+
+- (void)netService:(NSNetService *)sender didNotPublish:(NSDictionary<NSString *,NSNumber *> *)errorDict {
+    NSLog(@"[Bonjour] Échec publication service : %@", errorDict);
 }
 
 @end

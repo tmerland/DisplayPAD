@@ -40,6 +40,9 @@ class StreamingEngine: NSObject, ObservableObject {
 
     weak var delegate: StreamingEngineDelegate?
 
+    /// Vérifie avant d'encoder si le réseau peut accepter la frame (évite le bufferbloat)
+    var shouldEncodeFrame: (() -> Bool)?
+
     @Published var isCapturing: Bool = false
     @Published var measuredFPS: Double = 0.0
     @Published var measuredBitrate: Double = 0.0
@@ -186,6 +189,16 @@ class StreamingEngine: NSObject, ObservableObject {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,
                              value: kCFBooleanFalse)
 
+        // Aucune frame en attente dans l'encodeur (0 latence tampon encodeur)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount,
+                             value: NSNumber(value: 0))
+
+        // Plafond de pic de débit (évite qu'une keyframe sature le Wi-Fi)
+        let bytesPerSec = Double(bitrate) / 8.0 * 1.5
+        let dataRateLimits = [bytesPerSec, 1.0] as CFArray
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
+                             value: dataRateLimits)
+
         // IDR toutes les ~60 frames (~2s à 30fps)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
                              value: NSNumber(value: 60))
@@ -221,7 +234,8 @@ class StreamingEngine: NSObject, ObservableObject {
             config.height = settings.actualHeight
             config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(settings.actualFPS))
             config.pixelFormat = kCVPixelFormatType_32BGRA
-            config.showsCursor = true // Pas de curseur en v0.1
+            config.showsCursor = true // Curseur inclus
+            config.queueDepth = 2 // File minimale pour éviter la latence ScreenCaptureKit
 
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
 
@@ -353,8 +367,11 @@ extension StreamingEngine: SCStreamOutput {
                             of outputType: SCStreamOutputType) {
         guard outputType == .screen else { return }
 
-        // Encode la frame si la session est disponible
+        // Encode la frame si la session est disponible et que le réseau n'est pas congestionné
         Task { @MainActor in
+            if let shouldEncode = self.shouldEncodeFrame, !shouldEncode() {
+                return
+            }
             self.capturedCount += 1
             guard let session = compressionSession,
                   let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {

@@ -4,7 +4,7 @@
   <img src="Images/social-preview.png" alt="DisplayPAD" width="800">
 </p>
 
-![Version](https://img.shields.io/badge/version-v0.1.0-blue) ![Platform Mac](https://img.shields.io/badge/platform-macOS-lightgrey) ![Platform iPad](https://img.shields.io/badge/platform-iOS%2012.5-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-v0.2.0-blue) ![Platform Mac](https://img.shields.io/badge/platform-macOS-lightgrey) ![Platform iPad](https://img.shields.io/badge/platform-iOS%2012.5-lightgrey) ![License](https://img.shields.io/badge/license-MIT-green)
 
 > **Turn a jailbroken iPad Air into a wired USB second display — for free.**
 > DisplayPAD is an open-source alternative to Duet Display that uses a Lightning cable and your existing USB stack instead of a paid subscription.
@@ -33,6 +33,12 @@
 | **iPad app** | Objective-C / Theos | Cydia/Sileo `.deb`; receives frames, decodes with VideoToolbox, renders full-screen |
 | **Transport** | `usbmuxd` → TCP port 7000 | No Wi-Fi needed; `iproxy` tunnels the connection over Lightning |
 | **Codec** | H.264 Annex-B | Hardware encode on Mac (VideoToolbox), hardware decode on iPad |
+
+> [!WARNING]
+> **Performance & Hardware Disclaimer**
+> - **Use Wired USB for Best Performance**: DisplayPAD is designed primarily for **Lightning/USB** (`usbmuxd`), which delivers near-zero latency and reliable 60 FPS streaming while charging your iPad.
+> - **Legacy Hardware Limits (iPad Air 1 / Apple A7)**: On older 2013 A7 devices, decoding full Retina `2048×1536` at `60 fps` pushes the hardware decoder to its limits. If you notice lag or dropped frames, switching to **`1366×1024 @ 30 fps`** (or `1024×768 HiDPI`) significantly improves responsiveness and readability.
+> - **Wireless (Wi-Fi / AWDL) is Experimental**: Wireless modes (Direct IP and Apple AWDL) are included for convenience, but older 802.11n Wi-Fi chips suffer from high jitter and bandwidth fluctuations, resulting in noticeable latency compared to USB.
 
 ---
 
@@ -180,14 +186,14 @@ On the iPad side, any TCP listener on port 7000 (e.g. `nc -l 7000 > /tmp/stream.
 
 ## Roadmap
 
+Pour le détail complet de l'analyse de faisabilité technique et de l'architecture des futures versions, consultez le document dédié : [ROADMAP.md](file:///Users/thibaultmerland/Library/CloudStorage/OneDrive-INSTITUTIONCHARTREUX/DisplayPAD/DisplayPAD/ROADMAP.md).
+
 | Milestone | Description | Status |
 |-----------|-------------|--------|
-| **v0.1 — PoC** | Folder structure, shared protocol header, test stream script | ✅ Done |
-| **v0.2 — Mac sender** | SwiftUI menu-bar app, ScreenCaptureKit capture + cursor, VideoToolbox H.264 hardware encode, live stats | ✅ Done & Tested |
-| **v0.3 — Virtual screen** | CGVirtualDisplay virtual display on macOS with HiDPI Retina support and multiple resolution presets | ✅ Done & Tested |
-| **v0.4 — iPad Receiver** | Native Theos app, AVSampleBufferDisplayLayer hardware decoding, auto-handshake over USB | ✅ Done & Tested |
-| **v1.0 — Release** | Stability, auto-reconnect, Sileo package, branding & icons, public release | 🟡 In progress |
-| **v2.0 — Touch input** | Forward iPad touch events back to Mac as HID pointer/keyboard events | ⬜ Planned |
+| **v0.1 — Initial PoC** | Virtual Display macOS, flux H.264 matériel USB, app iOS Theos, auto-reconnexion | ✅ Done |
+| **v0.2 — iPad Experience** | Menu réglages 3 doigts, Zoom interactif (Pinch-to-zoom/Pan), affichage IP/télémétrie | 🟡 Prochain jalon |
+| **v0.3 — Sans-Fil (Wi-Fi)** | Connexion Wi-Fi directe, découverte automatique mDNS/Bonjour, profils de débit adaptatifs | ⬜ Planifié |
+| **v1.0 — Événements Tactiles** | Retransmission des touch events iPad vers macOS (clics, curseur, glisser-déposer) | ⬜ Planifié |
 
 ---
 

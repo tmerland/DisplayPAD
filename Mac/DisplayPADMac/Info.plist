@@ -16,7 +16,7 @@
 
     <!-- Version marketing (affichée dans À propos) -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
 
     <!-- Version de build (entier, incrémenté à chaque build) -->
     <key>CFBundleVersion</key>
@@ -57,6 +57,14 @@
     <array>
         <string>fr</string>
         <string>en</string>
+    </array>
+
+    <!-- Description réseau local et services Bonjour (requis sur macOS récent pour AWDL) -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>DisplayPAD utilise le réseau local et Wi-Fi Direct (AWDL) pour découvrir votre iPad et diffuser l'écran.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_displaypad._tcp</string>
     </array>
 
     <!-- Droits réseau sortants (connexion TCP vers iproxy) -->

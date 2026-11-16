@@ -137,8 +137,10 @@ class AppSettings: ObservableObject {
 
     // MARK: Connexion
 
-    @AppStorage("tcpPort")        var tcpPort: Int        = 7100
-    @AppStorage("autoReconnect")  var autoReconnect: Bool = true
+    @AppStorage("connectionMode") var connectionMode: String = "usb"     // "usb" ou "wifi"
+    @AppStorage("customHost")     var customHost: String     = ""        // IP de l'iPad en Wi-Fi
+    @AppStorage("tcpPort")        var tcpPort: Int           = 7100
+    @AppStorage("autoReconnect")  var autoReconnect: Bool    = true
 
     // MARK: Encodage
 

@@ -101,4 +101,22 @@ typedef struct {
  *   No payload.  DPHeader.length == 0.
  */
 
+/* ------------------------------------------------------------------ */
+/*  UDP Video Streaming (Wi-Fi Low Latency)                            */
+/* ------------------------------------------------------------------ */
+#define DP_UDP_PORT       7001
+#define DP_UDP_MAGIC      0x44505544u /* "DPUD" */
+#define DP_UDP_MAX_CHUNK  1350u       /* Taille max d'un morceau par datagramme */
+
+/**
+ * DPUDPChunkHeader — en-tête de 12 octets pour chaque datagramme UDP vidéo.
+ * Toutes les valeurs sont en big-endian (network order).
+ */
+typedef struct {
+    uint32_t magic;        /* 0x44505544 "DPUD"         */
+    uint32_t frame_id;     /* ID séquentiel de l'image  */
+    uint16_t chunk_index;  /* Index du morceau (0..N-1) */
+    uint16_t chunk_count;  /* Nombre total de morceaux  */
+} __attribute__((packed)) DPUDPChunkHeader;
+
 #endif /* DISPLAYPAD_PROTOCOL_H */

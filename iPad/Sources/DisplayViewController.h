@@ -5,8 +5,9 @@
 #import <CoreMedia/CoreMedia.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import "TCPReceiver.h"
+#import "SettingsOverlayView.h"
 
-@interface DisplayViewController : UIViewController <TCPReceiverDelegate>
+@interface DisplayViewController : UIViewController <TCPReceiverDelegate, SettingsOverlayDelegate, UIGestureRecognizerDelegate>
 
 /// Couche vidéo plein écran (décodage matériel H.264 natif sur A7+)
 @property (nonatomic, strong) AVSampleBufferDisplayLayer *displayLayer;

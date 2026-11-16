@@ -46,7 +46,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Lance la connexion au démarrage si l'auto-reconnect est activé
         if appSettings.autoReconnect {
-            connectionManager.connect(port: appSettings.tcpPort)
+            if appSettings.connectionMode == "awdl" {
+                connectionManager.connectPeerToPeer()
+            } else if appSettings.connectionMode == "wifi" && !appSettings.customHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let host = appSettings.customHost.trimmingCharacters(in: .whitespacesAndNewlines)
+                connectionManager.connect(host: host, port: 7000)
+            } else {
+                connectionManager.connect(host: "127.0.0.1", port: appSettings.tcpPort)
+            }
         }
     }
 
@@ -64,6 +71,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// HELLO_ACK → CONFIG ; CONFIG_ACK → écran virtuel + capture ; déconnexion → arrêt.
     private func configurerSession() {
         streamingEngine.delegate = self
+        streamingEngine.shouldEncodeFrame = { [weak self] in
+            return self?.connectionManager.canSendFrame ?? false
+        }
 
         // Synchroniser les statistiques réelles vers ConnectionManager (affichées dans le Popover)
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
